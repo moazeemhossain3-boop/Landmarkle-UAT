@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en" class="transition-colors duration-300">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Landmarkle: The Daily Landmark Game</title>
+    <!-- Load Tailwind CSS from CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load React, ReactDOM, and Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Configure Tailwind to support dark mode via class -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes soft-fade-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-soft-fade-in {
+            animation: soft-fade-in 0.6s ease-out forwards;
+        }
+
+        @keyframes tile-fade-in {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-tile-fade-in {
+            animation: tile-fade-in 0.4s ease-out forwards;
+            opacity: 0;
+        }
+        /* Staggered delays for sequential animation */
+        .animate-tile-fade-in-1 { animation-delay: 0.1s; }
+        .animate-tile-fade-in-2 { animation-delay: 0.2s; }
+        .animate-tile-fade-in-3 { animation-delay: 0.3s; }
+
+        /* FIREWORKS ANIMATION CSS */
+        @keyframes firework-burst {
+            0% { transform: translate(0, 0) scale(1) rotate(0deg); opacity: 1; }
+            100% { transform: translate(var(--x), var(--y)) scale(0.1) rotate(var(--r)); opacity: 0; }
+        }
+
+        .firework-particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            animation: firework-burst 0.7s cubic-bezier(.17,.67,.83,.67) forwards;
+            animation-iteration-count: 1;
+        }
+        /* END FIREWORKS ANIMATION CSS */
+
+        /* --- Checkmark Animation --- */
+        @keyframes draw-check {
+            from {
+                stroke-dashoffset: 24;
+            }
+            to {
+                stroke-dashoffset: 0;
+            }
+        }
+        .animate-draw-check {
+            stroke-dasharray: 24;
+            stroke-dashoffset: 24;
+            animation: draw-check 0.5s ease-out forwards;
+        }
+        /* --- End Checkmark Animation --- */
+
+
+        /* Dark Mode Transition Fix */
+        html.dark {
+            color-scheme: dark;
+        }
+        body {
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+        body.dark {
+            background-color: #1a202c;
+            color: #e2e8f0;
+        }
+    </style>
+</head>
+<body class="font-sans">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useCallback, useRef, useEffect, forwardRef } = React;
+        const { createRoot } = ReactDOM;
+
+        // --- CONSTANTS ---
+        const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQAE2j9U1ifa6TdQy_-2FDB_cHGwRa69XFZcqGoBs-3TtgRIG94jH0R0uD-_-xlz4Mjumat3KgG95n1/pub?output=csv"; // <-- *** REPLACE THIS WITH YOUR NEW GOOGLE SHEET CSV URL ***
+        // Local storage keys
+        const DAILY_STATE_KEY = 'landmarkle_daily_state';
+        const STREAK_KEY = 'landmarkle_streak';
+
+        const ZOOM_LEVELS = [
+            "scale-[3.4] object-center", // Guess 1
+            "scale-[2.9] object-center", // Guess 2
+            "scale-[2.3] object-center", // Guess 3
+            "scale-[1.9] object-center", // Guess 4
+            "scale-[1.6] object-center", // Guess 5
+            "scale-[1.0] object-center", // Guess 6 / End Game
+        ];
+        const MAX_GUESSES = ZOOM_LEVELS.length - 1;
+
+        // --- UTILITY FUNCTIONS FOR DAILY LOGIC AND DATA ---
+
+        /**
+         * Returns the date key for the user's current day (YYYY-MM-DD).
+         */
+        const getTodayKey = () => {
+            const date = new Date();
+            // Adjust for local timezone offset before getting ISO string
+            const offset = date.getTimezoneOffset() * 60000; // Offset in milliseconds
+            const localDate = new Date(date.getTime() - offset);
+            return localDate.toISOString().split('T')[0];
+        };
+
+        /**
+         * A simple, consistent seedable RNG (Linear Congruential Generator).
+         * Used to pick the same landmark index based on the date seed.
+         */
+        const seedableRandom = (seed) => {
+            let state = Math.floor(Math.abs(seed));
+            return function() {
+                state = (1103515245 * state + 12345) % 2147483648; // LCG parameters
+                return state / 2147483647; // Normalize to 0-1 (exclusive of 1)
+            };
+        };
+
+        /**
+         * Converts a date key (YYYY-MM-DD) into a consistent number seed.
+         */
+        const getDaySeed = (dateKey) => {
+            // Simple hash function for the date string
+            let hash = 0;
+            for (let i = 0; i < dateKey.length; i++) {
+                const char = dateKey.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash |= 0; // Convert to 32bit integer
+            }
+            return hash;
+        };
+
+        /**
+         * Selects the daily landmark consistently using the date key as a seed.
+         */
+        const getDailyLandmark = (landmarks, dateKey) => {
+            if (!landmarks || landmarks.length === 0) return null;
+            const seed = getDaySeed(dateKey);
+            const rand = seedableRandom(seed);
+            const index = Math.floor(rand() * landmarks.length);
+            console.log(`Daily seed: ${seed}, Random value generated (ignore this one), Selected index: ${index}`); // Log for debugging
+            return landmarks[index];
+        };
+
+        // --- UTILITY: Fetch and Parse CSV Data ---
+         const fetchData = async () => {
+            try {
+                if (CSV_URL === "YOUR_LANDMARKLE_CSV_URL_HERE") {
+                    throw new Error("CSV_URL has not been set. Please replace the placeholder URL in the code.");
+                }
+                const response = await fetch(CSV_URL);
+                if (!response.ok) {
+                    throw new Error(`HTTP Error Status: ${response.status}`);
+                }
+                const csvText = await response.text();
+
+                const lines = csvText.trim().split('\n');
+                if (lines.length <= 1) throw new Error("CSV is empty or header-only.");
+
+                const rawHeaders = lines[0].split(',');
+                const headerMap = {};
+                let foundCount = 0;
+                rawHeaders.forEach((rawHeader, index) => {
+                    const normalized = rawHeader.toLowerCase().trim().replace(/[^a-z0-9]+/g, '');
+                    if (normalized.includes('country') && !headerMap.country) { headerMap.country = index; foundCount++; }
+                    else if (normalized.includes('city') && !headerMap.city) { headerMap.city = index; foundCount++; }
+                    else if (normalized.includes('landmark') && !headerMap.landmark) { headerMap.landmark = index; foundCount++; }
+                    else if (normalized.includes('image') && !headerMap.imageurl) { headerMap.imageurl = index; foundCount++; }
+                });
+
+                if (foundCount < 4) {
+                    const missing = ['country', 'city', 'landmark', 'imageurl'].filter(key => !headerMap[key]);
+                    throw new Error(`CSV missing required headers: ${missing.join(', ')}. Check sheet columns.`);
+                }
+
+                return lines.slice(1).map((line, index) => {
+                    // Simpler split, assuming no complex quoted commas within fields
+                    const values = line.split(',').map(field => field.trim().replace(/^"|"$/g, '')); // Trim and clean quotes
+                    
+                    const maxIndex = Math.max(headerMap.country, headerMap.city, headerMap.landmark, headerMap.imageurl);
+                    if (values.length <= maxIndex) {
+                       console.warn(`Skipping row ${index + 2}: potentially malformed or missing data.`);
+                       return null;
+                    }
+                    
+                    const imageUrl = values[headerMap.imageurl] || "";
+
+                    return {
+                        id: `landmark-${index}`,
+                        country: values[headerMap.country] || 'Unknown',
+                        city: values[headerMap.city] || 'Unknown',
+                        landmark: values[headerMap.landmark] || 'Unknown',
+                        imageUrl: imageUrl || "https://placehold.co/1200x800/607D8B/white?text=LANDMARK+IMG+MISSING",
+                    };
+                }).filter(landmark => landmark); // Filter out nulls
+            } catch (error) {
+                console.error("Failed to fetch or parse landmark data:", error);
+                throw error; // Re-throw to be caught by the component
+            }
+        };
+
+
+        // --- Guess Tile Component for History Display (Updated Color to custom green) ---
+        const GuessTile = ({ label, value, isCorrect, animationDelayClass }) => {
+            // Use red for incorrect, custom green #88E788 for correct
+            let bgColor = "bg-red-500 dark:bg-red-600";
+            let textColor = "text-white"; // Default text color for red
+
+            if (isCorrect) {
+                // Use custom hex #88E788 for both light and dark modes
+                bgColor = "bg-[#88E788]"; // Removed dark: prefix
+                // Use a dark text color for contrast against the light green
+                textColor = "text-lime-950"; // Dark text ensures readability
+            }
+
+            const correctIcon = ( <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block ml-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 14.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg> );
+            const incorrectIcon = ( <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block ml-1" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" /></svg> );
+
+            // Apply conditional text color
+            return ( <div className={`flex-1 p-2 rounded-lg ${bgColor} ${textColor} font-semibold shadow-inner transition-colors duration-300 animate-tile-fade-in ${animationDelayClass}`}> <div className="text-xs opacity-80 uppercase tracking-widest flex items-center justify-center"> {label} {isCorrect ? correctIcon : incorrectIcon} </div> <div className="text-sm sm:text-base truncate"> {value} </div> </div> );
+        };
+
+        // --- Autocomplete Input Component with Ref Forwarding (With Checkmark) ---
+        const AutocompleteInput = forwardRef(({ label, value, onChange, suggestions, onSelect, placeholder, disabled = false, isCorrect = false }, ref) => {
+            const [showSuggestions, setShowSuggestions] = useState(false); const inputRef = useRef(null); const suggestionsRef = useRef(null);
+            useEffect(() => { const handleClickOutside = (event) => { if (inputRef.current && !inputRef.current.contains(event.target) && suggestionsRef.current && !suggestionsRef.current.contains(event.target)) { setShowSuggestions(false); } }; document.addEventListener('mousedown', handleClickOutside); return () => document.removeEventListener('mousedown', handleClickOutside); }, []);
+            const handleInputChange = (e) => { onChange(e.target.value); setShowSuggestions(true); }; const handleSelectSuggestion = (suggestion) => { onSelect(suggestion); setShowSuggestions(false); };
+            const filteredSuggestions = useMemo(() => { if (!value) return suggestions; return suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase())); }, [value, suggestions]);
+            
+            return ( 
+                <div ref={ref} className="relative w-full"> 
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 sr-only">{label}</label> 
+                    <input 
+                        ref={inputRef} 
+                        type="text" 
+                        placeholder={placeholder} 
+                        value={value} 
+                        onChange={handleInputChange} 
+                        onFocus={() => setShowSuggestions(true)} 
+                        disabled={disabled} 
+                        className={`input-field w-full p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 ${isCorrect ? 'pr-10' : ''} ${disabled ? 'border-indigo-600 bg-indigo-100 dark:bg-indigo-900/50 text-black dark:text-white cursor-not-allowed' : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-black dark:text-white'}`} 
+                    /> 
+                    {showSuggestions && filteredSuggestions.length > 0 && ( 
+                        <ul ref={suggestionsRef} className="absolute z-10 w-full mt-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-md shadow-lg max-h-48 overflow-y-auto"> 
+                            {filteredSuggestions.map((suggestion, index) => ( 
+                                <li key={index} onClick={() => handleSelectSuggestion(suggestion)} className="p-2 cursor-pointer hover:bg-indigo-100 dark:hover:bg-zinc-700 text-black dark:text-white"> {suggestion} </li> 
+                            ))} 
+                        </ul> 
+                    )} 
+                    {isCorrect && ( 
+                        <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="3" stroke="currentColor" className="h-5 w-5 text-[#88E788]">
+                                <path className="animate-draw-check" strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                            </svg>
+                        </div> 
+                    )}
+                </div> 
+            );
+        });
+
+        // --- Fireworks Overlay Component (Unchanged) ---
+        const COLORS = ['#FF5733', '#FFBD33', '#33FF57', '#3357FF', '#FF33A1', '#FF3333', '#FFD700', '#ADFF2F']; const NUM_PARTICLES = 20;
+        const FireworksOverlay = () => { const bursts = useMemo(() => { const bP = [{ k: 'tl', xO: '0%', yO: '0%', d: 0 }, { k: 'tr', xO: '100%', yO: '0%', d: 0.1 }, { k: 'bl', xO: '0%', yO: '100%', d: 0.15 }, { k: 'br', xO: '100%', yO: '100%', d: 0.2 }]; return bP.map(b => Array.from({ length: NUM_PARTICLES }).map((_, i) => { const x = (Math.random() - 0.5) * 200; const y = (Math.random() - 0.5) * 200; const r = Math.random() * 360; const c = COLORS[Math.floor(Math.random() * COLORS.length)]; const dur = 0.5 + Math.random() * 0.3; return ( <div key={`${b.k}-${i}`} className="firework-particle" style={{ backgroundColor: c, '--x': `${x}px`, '--y': `${y}px`, '--r': `${r}deg`, animationDelay: `${b.d + Math.random() * 0.2}s`, animationDuration: `${dur}s`, left: b.xO, top: b.yO, transform: 'translate(-50%, -50%)' }} /> ); })); }, []); return ( <div className="absolute inset-0 pointer-events-none overflow-hidden z-30"> {bursts.map((burst, i) => ( <React.Fragment key={i}> {burst} </React.Fragment> ))} </div> ); };
+
+        // --- Share Utility Function (Updated for Streak & Name) ---
+        const copyToClipboardFallback = (text) => { return new Promise((resolve, reject) => { const tA = document.createElement('textarea'); tA.value = text; tA.style.position = 'fixed'; tA.style.left = '-9999px'; document.body.appendChild(tA); tA.select(); try { const s = document.execCommand('copy'); document.body.removeChild(tA); if (s) { resolve(); } else { reject(new Error("execCommand failed")); } } catch (e) { document.body.removeChild(tA); reject(e); } }); };
+        const shareResults = async (guesses, finalStatus, streak) => { // Added streak parameter
+            const totalGuesses = guesses.length; 
+            const emojiGrid = guesses.map(g => { 
+                const cE = g.correctness.country ? '🔵' : '🔴'; 
+                const ciE = g.correctness.city ? '🔵' : '🔴'; 
+                const lE = g.correctness.landmark ? '🔵' : '🔴'; 
+                return `${cE}${ciE}${lE}`; 
+            }).join('\n'); // Use blue circle for correct
+            
+            const resultText = finalStatus === 'won' ? `Landmarkle ${totalGuesses}/${MAX_GUESSES}` : `Landmarkle X/${MAX_GUESSES}`;
+            const shareText = [resultText, `🔥 Streak ${streak}`, '', emojiGrid, '', 'Can you guess the landmark? [APP_LINK_PLACEHOLDER]'].join('\n'); // Include streak
+            const shareData = { text: shareText, title: 'My Landmarkle Score' }; let fM = '';
+            
+            if (navigator.share) { try { await navigator.share(shareData); fM = 'Shared!'; } catch (e) { if (e.name !== 'AbortError') { fM = 'Share failed. Copied.'; } else { fM = 'Copied!'; } try { await copyToClipboardFallback(shareText); } catch (cE) { fM = 'Copy failed.'; } } } else { try { await copyToClipboardFallback(shareText); fM = 'Copied!'; } catch (cE) { fM = 'Copy failed.'; } }
+            const fE = document.getElementById('shareFeedback'); if (fE) { fE.textContent = fM; fE.classList.remove('opacity-0'); setTimeout(() => { fE.classList.add('opacity-0'); }, 3000); }
+        };
+
+        // --- Game End Modal Component (Updated for Daily Format & Streak & Color) ---
+        const GameEndModal = ({ targetLandmark, guesses, gameState, streak, onDismiss }) => { 
+            const totalGuesses = guesses.length; const isWon = gameState === 'won'; const titleText = isWon ? 'WINNER!' : 'GAME OVER'; const pointsThisRound = isWon ? (MAX_GUESSES - totalGuesses + 1) * 10 : 0;
+            const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); const tomorrowKey = tomorrow.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); // Format for display
+            // Determine correctness for the final display circles
+            const finalCorrectness = guesses[guesses.length -1]?.correctness || {country: false, city: false, landmark: false};
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black bg-opacity-70 backdrop-blur-sm animate-soft-fade-in">
+                    <div className="bg-white dark:bg-zinc-800 text-black dark:text-white rounded-xl shadow-2xl w-full max-w-sm md:max-w-md p-6 relative">
+                        {isWon && <FireworksOverlay />}
+                        <button onClick={onDismiss} className="absolute top-4 right-4 z-50 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"> <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg> </button>
+                        <h2 className={`text-2xl font-extrabold text-center mb-1 z-20 ${isWon ? 'text-indigo-600' : 'text-red-600'}`}> {titleText} </h2> {/* Changed win title color to indigo */}
+                        <p className="text-sm text-center font-medium text-zinc-600 dark:text-zinc-400 mb-4 z-20"> 
+                            The Landmark was: <span className="font-semibold">{targetLandmark.landmark} ({targetLandmark.city}, {targetLandmark.country})</span> 
+                        </p>
+                        <div className="w-full h-40 overflow-hidden rounded-lg shadow-lg mb-4 relative z-20"> 
+                            <img src={targetLandmark.imageUrl} alt="Target Landmark" className={`absolute inset-0 w-full h-full object-cover ${ZOOM_LEVELS[MAX_GUESSES]}`} onError={(e) => e.target.src = "https://placehold.co/1200x800/607D8B/white?text=Image+Not+Found"} /> 
+                        </div>
+                        {/* Use blue for correct circles (indigo-500) */}
+                        <div className="flex justify-center gap-4 py-3 border-b border-zinc-200 dark:border-zinc-700 mb-4 z-20">
+                            <div className="text-center"> <span className={`inline-block h-4 w-4 rounded-full ${finalCorrectness.country ? 'bg-indigo-500' : 'bg-red-500'}`} /> <p className="text-xs mt-1 font-semibold">Country</p> </div>
+                            <div className="text-center"> <span className={`inline-block h-4 w-4 rounded-full ${finalCorrectness.city ? 'bg-indigo-500' : 'bg-red-500'}`} /> <p className="text-xs mt-1 font-semibold">City</p> </div>
+                            <div className="text-center"> <span className={`inline-block h-4 w-4 rounded-full ${finalCorrectness.landmark ? 'bg-indigo-500' : 'bg-red-500'}`} /> <p className="text-xs mt-1 font-semibold">Landmark</p> </div>
+                        </div>
+                        <div className="flex justify-between text-sm font-medium mb-6 z-20"> <div> <p>Guesses:</p> <p>Score:</p> <p className="font-bold">🔥 Streak:</p> </div> <div className="text-right font-bold"> <p>{isWon ? `${totalGuesses}/${MAX_GUESSES}` : `X/${MAX_GUESSES}`}</p> <p>{pointsThisRound}</p> <p>{streak}</p> </div> </div>
+                        <div className="flex flex-col gap-3 z-20">
+                            {/* Pass streak to shareResults */}
+                            <button onClick={() => shareResults(guesses, gameState, streak)} className="flex items-center justify-center px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-colors"> Share Results <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6.632l6.632-3.316m6.632 3.316a3 3 0 110-6 3 3 0 010 6zm0 6a3 3 0 110-6 3 3 0 010 6z" /></svg> </button>
+                            {/* Removed Play Again button, added next game message */}
+                            <div className="text-center text-sm text-zinc-600 dark:text-zinc-400 font-medium pt-2"> Check back tomorrow ({tomorrowKey}) for a new landmark! </div>
+                            <p id="shareFeedback" className="text-sm text-center text-indigo-600 font-medium opacity-0 transition-opacity duration-300 h-4"></p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+
+        // --- Main Application Component ---
+        function App() {
+            const todayKey = getTodayKey();
+
+            // Load initial streak from local storage
+            const initialStreak = parseInt(localStorage.getItem(STREAK_KEY) || '0', 10);
+
+            // STATE
+            const [allLandmarks, setAllLandmarks] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [targetLandmark, setTargetLandmark] = useState(null);
+            const [streak, setStreak] = useState(initialStreak); // Initialize streak state
+            const [guesses, setGuesses] = useState([]);
+            const [gameState, setGameState] = useState("loading"); // 'loading', 'playing', 'won', 'lost', 'error'
+            const [message, setMessage] = useState("");
+            const [showModal, setShowModal] = useState(false);
+            const [currentGuess, setCurrentGuess] = useState({ country: "", city: "", landmark: "", countryCorrect: false, cityCorrect: false, landmarkCorrect: false });
+            // --- Dark Mode State ---
+            const [darkMode, setDarkMode] = useState(false); // Initial state set in useEffect
+
+
+            // --- Effect to Load Data, Determine Daily Landmark, and Load/Reset State ---
+            useEffect(() => {
+                const initializeGame = async () => {
+                    try {
+                        console.log("Fetching landmark data...");
+                        const landmarks = await fetchData();
+                        if (!landmarks || landmarks.length === 0) throw new Error("No valid landmark data loaded.");
+                        setAllLandmarks(landmarks);
+
+                        // Determine the Daily Landmark using seed
+                        const dailyLandmark = getDailyLandmark(landmarks, todayKey);
+                        if (!dailyLandmark) throw new Error("Could not determine daily landmark.");
+                        setTargetLandmark(dailyLandmark);
+                        window.targetLandmark = dailyLandmark;
+                        console.log("Today's Landmark:", dailyLandmark);
+
+                        // Load saved state or start fresh
+                        const savedState = JSON.parse(localStorage.getItem(DAILY_STATE_KEY));
+                        let currentStreak = parseInt(localStorage.getItem(STREAK_KEY) || '0', 10); // Re-fetch streak
+
+                        if (savedState && savedState.dateKey === todayKey) {
+                            console.log("Resuming today's game...");
+                            setGuesses(savedState.guesses);
+                            setGameState(savedState.gameState);
+                            // Important: Restore currentGuess progress *including* correctness flags
+                            setCurrentGuess(savedState.currentGuess);
+                            setShowModal(savedState.gameState !== 'playing'); // Show modal if already finished
+                            // Don't modify streak when resuming
+                        } else {
+                            console.log("Starting new game for", todayKey);
+                            setGuesses([]);
+                            setGameState('playing');
+                            setCurrentGuess({ country: "", city: "", landmark: "", countryCorrect: false, cityCorrect: false, landmarkCorrect: false });
+                            setShowModal(false);
+
+                             // Check if previous day was played and lost, reset streak if necessary
+                            if (savedState && savedState.dateKey !== todayKey && savedState.gameState === 'lost') {
+                                console.log("Streak reset due to loss yesterday.");
+                                currentStreak = 0;
+                                localStorage.setItem(STREAK_KEY, '0');
+                            }
+                             // Clear the old daily state for the new day
+                            localStorage.removeItem(DAILY_STATE_KEY);
+                        }
+                        setStreak(currentStreak); // Update streak state
+                         // Ensure correct game state after loading/resetting
+                        setGameState(savedState && savedState.dateKey === todayKey ? savedState.gameState : 'playing');
+
+                        // --- Initialize Dark Mode ---
+                        const savedTheme = localStorage.getItem('theme');
+                        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                        setDarkMode(savedTheme === 'dark' || (!savedTheme && prefersDark));
+
+
+                    } catch (err) {
+                        setError(err.message || "An unknown error occurred.");
+                        setGameState("error");
+                    } finally {
+                        setIsLoading(false);
+                    }
+                };
+                initializeGame();
+            }, []); // Run only once on mount
+
+            // --- Effect to Save Game State to Local Storage ---
+            useEffect(() => {
+                // Don't save initial loading/error states or if targetLandmark isn't set
+                if (gameState === 'loading' || gameState === 'error' || !targetLandmark) return;
+
+                const stateToSave = {
+                    dateKey: todayKey,
+                    gameState,
+                    guesses,
+                    currentGuess, // Save the current input state including correctness flags
+                    targetLandmarkId: targetLandmark.id // Optional: save ID for verification
+                };
+                localStorage.setItem(DAILY_STATE_KEY, JSON.stringify(stateToSave));
+                // Streak is saved directly in handleSubmitGuess on win/loss
+            }, [guesses, gameState, currentGuess, todayKey, targetLandmark]); // Depend on relevant state
+
+
+            // --- Refs & Mobile Scroll Logic (Unchanged) ---
+            const countryRef = useRef(null); const cityRef = useRef(null); const landmarkRef = useRef(null);
+            useEffect(() => { const hF = (e) => { const eS = e.target.closest('.relative.w-full'); if (eS && window.innerWidth < 640) { setTimeout(() => { eS.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100); } }; const ipts = [countryRef.current?.querySelector('input'), cityRef.current?.querySelector('input'), landmarkRef.current?.querySelector('input')].filter(Boolean); ipts.forEach(i => i.addEventListener('focus', hF)); return () => { ipts.forEach(i => i.removeEventListener('focus', hF)); }; }, [gameState]); // Re-attach if inputs reappear
+
+            // --- Dark Mode Effect & Toggle Function ---
+             useEffect(() => {
+                 if (darkMode) { document.documentElement.classList.add('dark'); localStorage.setItem('theme', 'dark'); }
+                 else { document.documentElement.classList.remove('dark'); localStorage.setItem('theme', 'light'); }
+                 document.body.classList.toggle('dark', darkMode);
+             }, [darkMode]);
+             // Define toggleDarkMode function ONCE
+             const toggleDarkMode = () => { setDarkMode(prevMode => !prevMode); };
+
+
+            // --- Derived State for Autocomplete ---
+            // Memoized list of unique countries
+            const availableCountries = useMemo(() => {
+                return [...new Set(allLandmarks.map(l => l.country))].sort();
+            }, [allLandmarks]);
+
+            // Memoized list of cities, filtered based on current country guess/correctness
+            const availableCities = useMemo(() => {
+                // If a country has been correctly guessed, ONLY show cities for that country.
+                if (currentGuess.countryCorrect) {
+                    return [...new Set(allLandmarks.filter(l => l.country === currentGuess.country).map(l => l.city))].sort();
+                }
+                // If no country is entered yet, show all cities.
+                if (!currentGuess.country) {
+                     return [...new Set(allLandmarks.map(l => l.city))].sort();
+                }
+                // Otherwise (country is entered but not yet confirmed correct), filter by the entered country.
+                return [...new Set(allLandmarks.filter(l => l.country === currentGuess.country).map(l => l.city))].sort();
+
+            }, [currentGuess.country, currentGuess.countryCorrect, allLandmarks]); // Dependencies
+
+            // Memoized list of unique landmarks (independent)
+            const availableLandmarks = useMemo(() => {
+                return [...new Set(allLandmarks.map(l => l.landmark))].sort();
+            }, [allLandmarks]);
+
+            const currentZoomLevel = Math.min(guesses.length, MAX_GUESSES);
+            const currentImageTransform = ZOOM_LEVELS[currentZoomLevel];
+
+            // --- Event Handlers (Updated Streak Logic) ---
+            const showMessage = (msg) => { setMessage(msg); setTimeout(() => setMessage(""), 2000); };
+            const handleSelectCountry = useCallback((country) => { if (currentGuess.countryCorrect) return; setCurrentGuess(prev => ({ ...prev, country, city: "" })); }, [currentGuess.countryCorrect]);
+            const handleSelectCity = useCallback((city) => { if (currentGuess.cityCorrect) return; setCurrentGuess(prev => ({ ...prev, city })); }, [currentGuess.cityCorrect]);
+            const handleSelectLandmark = useCallback((landmark) => { if (currentGuess.landmarkCorrect) return; setCurrentGuess(prev => ({ ...prev, landmark })); }, [currentGuess.landmarkCorrect]);
+
+
+            const handleSubmitGuess = useCallback(() => {
+                if (gameState !== "playing" || !targetLandmark) return;
+
+                // Input validation
+                if (!currentGuess.country || !currentGuess.city || !currentGuess.landmark) { showMessage("Select Country, City, and Landmark."); return; }
+
+                // Check correctness
+                const correctCountry = currentGuess.country === targetLandmark.country; 
+                const correctCity = currentGuess.city === targetLandmark.city; 
+                const correctLandmark = currentGuess.landmark === targetLandmark.landmark;
+                const isCorrect = correctCountry && correctCity && correctLandmark;
+
+                const guessWithFeedback = { guess: { ...currentGuess }, result: isCorrect ? "correct" : "incorrect", correctness: { country: correctCountry, city: correctCity, landmark: correctLandmark }, imageUrl: targetLandmark.imageUrl, zoomLevel: currentZoomLevel };
+
+                // Update guesses state (triggers save effect)
+                setGuesses((prev) => [...prev, guessWithFeedback]);
+
+                // Update current guess state for next turn, incorporating new correctness
+                let nextGuessState = {
+                    ...currentGuess, // Start with current input values
+                    countryCorrect: currentGuess.countryCorrect || correctCountry,
+                    cityCorrect: currentGuess.cityCorrect || (correctCountry && correctCity), // City only correct if Country is also correct
+                    landmarkCorrect: currentGuess.landmarkCorrect || correctLandmark
+                };
+
+                // Clear fields only if they were *incorrect* on this guess
+                if (nextGuessState.countryCorrect) {
+                     // If Country is now correct, but City was incorrect this turn, clear City input
+                    if (!correctCity && !nextGuessState.cityCorrect) {
+                         nextGuessState.city = "";
+                    }
+                     // Don't clear Country input if it's correct
+                } else {
+                     // If Country was incorrect this turn, clear both Country and City inputs
+                    nextGuessState.country = "";
+                    nextGuessState.city = "";
+                }
+                
+                // Clear landmark field if it was incorrect (independent logic)
+                if (!correctLandmark) {
+                    nextGuessState.landmark = "";
+                }
+
+                setCurrentGuess(nextGuessState); // Update the input fields state
+
+                // --- Game Over Logic with Streak Update ---
+                if (isCorrect) {
+                    // WINNER
+                    setGameState("won");
+                    setShowModal(true);
+                    // Increment streak and save
+                    setStreak(prev => {
+                        const newStreak = prev + 1;
+                        localStorage.setItem(STREAK_KEY, newStreak.toString());
+                        console.log("Streak increased to:", newStreak);
+                        return newStreak;
+                    });
+                } else if (guesses.length + 1 >= MAX_GUESSES) {
+                    // LOSER
+                    setGameState("lost");
+                    setShowModal(true);
+                    // Reset streak and save
+                    setStreak(0);
+                    localStorage.setItem(STREAK_KEY, '0');
+                    console.log("Streak reset to 0.");
+                }
+                 // If neither win nor loss, game continues to next turn
+            }, [currentGuess, targetLandmark, guesses, gameState, todayKey]); // Added todayKey dependency for saving state
+
+
+            // --- Conditional Rendering for Loading/Error States ---
+            if (isLoading) { return ( <div className="flex justify-center items-center w-full min-h-screen bg-zinc-100 dark:bg-zinc-900 text-black dark:text-white"> <svg className="animate-spin h-8 w-8 text-indigo-500 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> <span>Loading Daily Landmark...</span> </div> ); }
+            if (gameState === 'error') { return ( <div className="flex flex-col justify-center items-center w-full min-h-screen bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 p-8 text-center"> <h1 className="text-2xl font-bold mb-4">Error Loading Game</h1> <p>{error}</p> <p className="mt-4 text-sm">Please check the console for details, ensure the CSV URL is correct and publicly accessible, and try refreshing.</p> </div> ); }
+            if (!targetLandmark) { return ( <div className="flex justify-center items-center w-full min-h-screen"> <p>Could not load the landmark for today.</p> </div> ); } // Safeguard
+
+            // --- Normal Game Render ---
+            return (
+                <div className="flex flex-col items-center w-full min-h-screen bg-zinc-100 dark:bg-zinc-900 text-black dark:text-white p-4 sm:p-6 relative"> {/* Add relative positioning here */}
+                    {/* Modal uses streak state, passes dismiss handler, no play again handler */}
+                    {showModal && (
+                        <GameEndModal
+                            targetLandmark={targetLandmark}
+                            guesses={guesses}
+                            gameState={gameState}
+                            streak={streak}
+                            onDismiss={() => setShowModal(false)}
+                        />
+                    )}
+
+                     {/* Moved Dark Mode Toggle Button outside header */}
+                     <button onClick={toggleDarkMode} className="absolute top-4 right-4 z-10 p-2 text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200" title={darkMode ? "Light Mode" : "Dark Mode"}>
+                         {darkMode ? (
+                             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}> <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /> </svg>
+                         ) : (
+                             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}> <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h1M3 12H2m15.325 5.232l-.707.707M6.707 6.707l-.707-.707m1.414 12.728l-.707.707M6.707 6.707l-.707-.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /> </svg>
+                         )}
+                     </button>
+
+                    <header className="w-full max-w-2xl text-center mb-4 mt-8"> {/* Added mt-8 for spacing below button */}
+                         {/* Responsive Title Size */}
+                        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-zinc-900 dark:text-zinc-100">Landmarkle</h1>
+                        {/* Updated Subtitle Text */}
+                        <p className="text-zinc-600 dark:text-zinc-400 text-sm sm:text-base mt-2">
+                            Guess today's landmark within {MAX_GUESSES} tries.
+                        </p>
+                        <p className="text-lg font-semibold mt-1">🔥 Current Streak: {streak}</p>
+                    </header>
+
+                    {message && ( <div className="fixed top-16 z-50 px-6 py-3 rounded-lg bg-black text-white shadow-lg"> {message} </div> )}
+
+                    <main className="relative w-full max-w-2xl h-64 sm:h-80 md:h-96 bg-zinc-200 dark:bg-zinc-800 rounded-lg shadow-xl overflow-hidden mb-6">
+                        <img src={targetLandmark.imageUrl} alt="Mystery Landmark" onError={(e) => { e.target.src = "https://placehold.co/1200x800/607D8B/white?text=LANDMARK_IMG_ERROR"; }} className={`absolute inset-0 w-full h-full transition-transform duration-700 ease-out object-cover ${currentImageTransform}`} />
+                        {(gameState === "won" || gameState === "lost") && !showModal && ( <div className="absolute inset-0 bg-black/50 flex items-center justify-center p-4"> <button onClick={() => setShowModal(true)} className="text-white text-3xl font-bold drop-shadow-lg underline"> {gameState === "won" ? `WINNER! View Results` : `GAME OVER. View Results`} </button> </div> )}
+                    </main>
+
+                    {/* --- Correctness Indicator Bar (REMOVED) --- */}
+
+
+                    {/* Inputs only show if playing */}
+                    {gameState === "playing" ? (
+                        <div className="flex flex-col sm:flex-row gap-3 mb-4 w-full max-w-2xl">
+                            <AutocompleteInput 
+                                ref={countryRef} 
+                                label="Country" 
+                                placeholder="Country" 
+                                value={currentGuess.country} 
+                                onChange={(v) => setCurrentGuess(p => ({ ...p, country: v, city: "" }))} 
+                                onSelect={handleSelectCountry} 
+                                suggestions={availableCountries} 
+                                disabled={currentGuess.countryCorrect} 
+                                isCorrect={currentGuess.countryCorrect} />
+                            <AutocompleteInput 
+                                ref={cityRef} 
+                                label="City" 
+                                placeholder="City" 
+                                value={currentGuess.city} 
+                                onChange={(v) => setCurrentGuess(p => ({ ...p, city: v }))} 
+                                onSelect={handleSelectCity} 
+                                suggestions={availableCities} 
+                                disabled={!currentGuess.country || currentGuess.cityCorrect} 
+                                isCorrect={currentGuess.cityCorrect} />
+                            <AutocompleteInput 
+                                ref={landmarkRef} 
+                                label="Landmark" 
+                                placeholder="Landmark" 
+                                value={currentGuess.landmark} 
+                                onChange={(v) => setCurrentGuess(p => ({ ...p, landmark: v }))} 
+                                onSelect={handleSelectLandmark} 
+                                suggestions={availableLandmarks} 
+                                disabled={currentGuess.landmarkCorrect} 
+                                isCorrect={currentGuess.landmarkCorrect} />
+                        </div>
+                    ) : (
+                         // Adjust placeholder height if indicator bar is shown
+                         <div className={`h-12 mb-4 w-full max-w-2xl`} />
+                    )}
+
+
+                    <div className="flex justify-center mb-6 w-full max-w-2xl">
+                         {/* Button text changes based on state */}
+                        {gameState === "playing" ? ( <button onClick={handleSubmitGuess} disabled={!currentGuess.country || !currentGuess.city || !currentGuess.landmark} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold text-xl rounded-lg shadow-md"> Guess ({guesses.length + 1}/{MAX_GUESSES}) </button> ) : ( <button onClick={() => setShowModal(true)} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xl rounded-lg shadow-md"> View Today's Results </button> )} {/* Changed color for consistency */}
+                    </div>
+
+                    {guesses.length > 0 && (
+                        <div className="w-full max-w-2xl bg-zinc-200 dark:bg-zinc-800 p-4 rounded-lg shadow-inner">
+                            <h3 className="text-xl font-semibold mb-3 text-center">Your Attempts</h3>
+                            <div className="flex flex-col gap-3">
+                                {guesses.map((g, i) => (
+                                    <div key={i} className={`p-3 rounded-xl border-2 ${g.result === "correct" ? "border-indigo-600 bg-indigo-50/70 dark:bg-indigo-900/50" : "border-red-600 bg-red-50/70 dark:bg-red-900/50"} ${i === guesses.length - 1 ? 'animate-soft-fade-in' : ''}`}> {/* Use indigo border for correct history */}
+                                        <div className="flex justify-center items-center font-bold mb-2"> {g.result === "correct" && ( <span className={`text-sm font-bold uppercase text-indigo-700 dark:text-indigo-400`}> FULL MATCH </span> )} </div> {/* Use indigo text for match */}
+                                        <div className="flex flex-col sm:flex-row gap-2 text-center text-sm"> 
+                                            <GuessTile label="Country" value={g.guess.country} isCorrect={g.correctness.country} animationDelayClass="animate-tile-fade-in-1" /> 
+                                            <GuessTile label="City" value={g.guess.city} isCorrect={g.correctness.city} animationDelayClass="animate-tile-fade-in-2" /> 
+                                            <GuessTile label="Landmark" value={g.guess.landmark} isCorrect={g.correctness.landmark} animationDelayClass="animate-tile-fade-in-3" /> 
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {/* Removed the 2-year tolerance text */}
+                            <p className="mt-4 mb-4 text-xs text-center text-zinc-500 dark:text-zinc-400">
+                                Correct guesses are shown in green.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- Render the App ---
+        const container = document.getElementById('root');
+        const root = createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>
