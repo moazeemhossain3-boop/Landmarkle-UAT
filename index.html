@@ -483,19 +483,53 @@
 
             }, [currentGuess.country, currentGuess.countryCorrect, allLandmarks]); // Dependencies
 
-            // Memoized list of unique landmarks (independent)
+            // ------------------------------------------------------------------
+            // ** MODIFIED: Landmark list is now filtered by Country and City **
+            // ------------------------------------------------------------------
             const availableLandmarks = useMemo(() => {
-                return [...new Set(allLandmarks.map(l => l.landmark))].sort();
-            }, [allLandmarks]);
+                let filteredLandmarks = allLandmarks;
+
+                // 1. Filter by Country (if country input has a value)
+                if (currentGuess.country) {
+                    filteredLandmarks = filteredLandmarks.filter(
+                        l => l.country.toLowerCase() === currentGuess.country.toLowerCase()
+                    );
+                }
+
+                // 2. Filter by City (if city input has a value)
+                if (currentGuess.city) {
+                    // This further filters the landmarks found in the (potentially filtered) Country list.
+                    filteredLandmarks = filteredLandmarks.filter(
+                        l => l.city.toLowerCase() === currentGuess.city.toLowerCase()
+                    );
+                }
+
+                // Return a unique, sorted list of landmark names from the final filtered list
+                return [...new Set(filteredLandmarks.map(l => l.landmark))].sort();
+
+            }, [allLandmarks, currentGuess.country, currentGuess.city]); // Dependencies on Country and City inputs
+            // ------------------------------------------------------------------
+
 
             const currentZoomLevel = Math.min(guesses.length, MAX_GUESSES);
             const currentImageTransform = ZOOM_LEVELS[currentZoomLevel];
 
             // --- Event Handlers (Updated Streak Logic) ---
             const showMessage = (msg) => { setMessage(msg); setTimeout(() => setMessage(""), 2000); };
-            const handleSelectCountry = useCallback((country) => { if (currentGuess.countryCorrect) return; setCurrentGuess(prev => ({ ...prev, country, city: "" })); }, [currentGuess.countryCorrect]);
-            const handleSelectCity = useCallback((city) => { if (currentGuess.cityCorrect) return; setCurrentGuess(prev => ({ ...prev, city })); }, [currentGuess.cityCorrect]);
-            const handleSelectLandmark = useCallback((landmark) => { if (currentGuess.landmarkCorrect) return; setCurrentGuess(prev => ({ ...prev, landmark })); }, [currentGuess.landmarkCorrect]);
+            const handleSelectCountry = useCallback((country) => { 
+                if (currentGuess.countryCorrect) return; 
+                // When country changes, clear city and landmark to force new selection
+                setCurrentGuess(prev => ({ ...prev, country, city: "", landmark: "" })); 
+            }, [currentGuess.countryCorrect]);
+            const handleSelectCity = useCallback((city) => { 
+                if (currentGuess.cityCorrect) return; 
+                // When city changes, clear landmark to force new selection
+                setCurrentGuess(prev => ({ ...prev, city, landmark: "" })); 
+            }, [currentGuess.cityCorrect]);
+            const handleSelectLandmark = useCallback((landmark) => { 
+                if (currentGuess.landmarkCorrect) return; 
+                setCurrentGuess(prev => ({ ...prev, landmark })); 
+            }, [currentGuess.landmarkCorrect]);
 
 
             const handleSubmitGuess = useCallback(() => {
@@ -590,7 +624,7 @@
                      {/* Moved Dark Mode Toggle Button outside header */}
                      <button onClick={toggleDarkMode} className="absolute top-4 right-4 z-10 p-2 text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200" title={darkMode ? "Light Mode" : "Dark Mode"}>
                          {darkMode ? (
-                             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}> <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /> </svg>
+                             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}> <path strokeLinecap="round" strokeLinelinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /> </svg>
                          ) : (
                              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}> <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h1M3 12H2m15.325 5.232l-.707.707M6.707 6.707l-.707-.707m1.414 12.728l-.707.707M6.707 6.707l-.707-.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /> </svg>
                          )}
@@ -624,7 +658,7 @@
                                 label="Country" 
                                 placeholder="Country" 
                                 value={currentGuess.country} 
-                                onChange={(v) => setCurrentGuess(p => ({ ...p, country: v, city: "" }))} 
+                                onChange={(v) => setCurrentGuess(p => ({ ...p, country: v, city: "", landmark: "" }))} 
                                 onSelect={handleSelectCountry} 
                                 suggestions={availableCountries} 
                                 disabled={currentGuess.countryCorrect} 
@@ -634,7 +668,7 @@
                                 label="City" 
                                 placeholder="City" 
                                 value={currentGuess.city} 
-                                onChange={(v) => setCurrentGuess(p => ({ ...p, city: v }))} 
+                                onChange={(v) => setCurrentGuess(p => ({ ...p, city: v, landmark: "" }))} 
                                 onSelect={handleSelectCity} 
                                 suggestions={availableCities} 
                                 disabled={!currentGuess.country || currentGuess.cityCorrect} 
